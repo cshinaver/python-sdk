@@ -1,4 +1,5 @@
 import logging
+import threading
 from contextlib import asynccontextmanager
 from typing import Any, cast
 from uuid import UUID
@@ -12,7 +13,7 @@ import mcp.types as types
 from mcp.server.message_queue.base import MessageCallback
 
 try:
-    import redis.asyncio as redis
+    import redis
 except ImportError:
     raise ImportError(
         "Redis support requires the 'redis' package. "
@@ -40,19 +41,45 @@ class RedisMessageDispatch:
             prefix: Key prefix for Redis channels to avoid collisions
             session_ttl: TTL in seconds for session keys (default: 1 hour)
         """
-        self._redis = redis.from_url(redis_url, decode_responses=True)  # type: ignore
-        self._pubsub = self._redis.pubsub(ignore_subscribe_messages=True)  # type: ignore
+        # Parse Redis URL and create connection
+        if redis_url.startswith("redis://"):
+            host_port = redis_url.replace("redis://", "").split("/")[0]
+            if ":" in host_port:
+                host, port = host_port.split(":")
+                port = int(port)
+            else:
+                host, port = host_port, 6379
+            db = int(redis_url.split("/")[-1]) if "/" in redis_url else 0
+            self._redis = redis.StrictRedis(host=host, port=port, db=db, decode_responses=True)
+        else:
+            self._redis = redis.StrictRedis.from_url(redis_url, decode_responses=True)
+        
+        self._pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
         self._prefix = prefix
         self._session_ttl = session_ttl
         # Maps session IDs to the callback and task group for that SSE session.
         self._session_state: dict[UUID, tuple[MessageCallback, TaskGroup]] = {}
+        # Thread for pubsub listening
+        self._pubsub_thread = None
+        # Lock for thread safety
+        self._lock = threading.RLock()
+        # Tracks current subscriptions
+        self._subscriptions: set[str] = set()
         # Ensures only one polling task runs at a time for message handling
         self._limiter = CapacityLimiter(1)
+        # Active sessions set key
+        self._active_sessions_key = f"{self._prefix}active_sessions"
         logger.debug(f"Redis message dispatch initialized: {redis_url}")
 
     async def close(self):
-        await self._pubsub.aclose() # type: ignore
-        await self._redis.aclose() # type: ignore
+        """Close Redis connections."""
+        # Stop pubsub thread if running
+        if self._pubsub_thread:
+            self._pubsub_thread.stop()
+        
+        # Clean up pubsub and connection
+        self._pubsub.close()
+        # Redis connection in 3.2.1 doesn't need explicit closing
 
     def _session_channel(self, session_id: UUID) -> str:
         """Get the Redis channel for a session."""
@@ -66,15 +93,33 @@ class RedisMessageDispatch:
     async def subscribe(self, session_id: UUID, callback: MessageCallback):
         """Request-scoped context manager that subscribes to messages for a session."""
         session_key = self._session_key(session_id)
-        await self._redis.setex(session_key, self._session_ttl, "1")  # type: ignore
+        
+        # Run Redis operations in anyio's run_sync to make blocking calls non-blocking
+        await anyio.to_thread.run_sync(
+            lambda: self._redis.setex(session_key, self._session_ttl, "1")
+        )
+        
+        # Add to active sessions set
+        await anyio.to_thread.run_sync(
+            lambda: self._redis.sadd(self._active_sessions_key, session_id.hex)
+        )
         
         channel = self._session_channel(session_id)
-        await self._pubsub.subscribe(channel)  # type: ignore
-
+        
+        # Use lock for thread safety
+        with self._lock:
+            # Subscribe to channel
+            await anyio.to_thread.run_sync(lambda: self._pubsub.subscribe(channel))
+            self._subscriptions.add(channel)
+        
         logger.debug(f"Subscribing to Redis channel for session {session_id}")
+        
         async with anyio.create_task_group() as tg:
             self._session_state[session_id] = (callback, tg)
-            tg.start_soon(self._listen_for_messages)
+            # Start message listener if not running
+            if not self._pubsub_thread:
+                tg.start_soon(self._listen_for_messages)
+            
             # Start heartbeat for this session
             tg.start_soon(self._session_heartbeat, session_id)
             try:
@@ -82,8 +127,21 @@ class RedisMessageDispatch:
             finally:
                 with anyio.CancelScope(shield=True):
                     tg.cancel_scope.cancel()
-                    await self._pubsub.unsubscribe(channel)  # type: ignore
-                    await self._redis.delete(session_key)  # type: ignore
+                    
+                    # Unsubscribe
+                    with self._lock:
+                        await anyio.to_thread.run_sync(
+                            lambda: self._pubsub.unsubscribe(channel)
+                        )
+                        self._subscriptions.discard(channel)
+                    
+                    # Delete session key and remove from active sessions
+                    await anyio.to_thread.run_sync(lambda: self._redis.delete(session_key))
+                    await anyio.to_thread.run_sync(
+                        lambda: self._redis.srem(self._active_sessions_key, session_id.hex)
+                    )
+                    
+                    # Clean up session state
                     del self._session_state[session_id]
                     logger.debug(f"Unsubscribed from Redis channel: {session_id}")
 
@@ -96,7 +154,10 @@ class RedisMessageDispatch:
                 # Refresh TTL at half the TTL interval to avoid expiration
                 await anyio.sleep(self._session_ttl / 2)
                 with anyio.CancelScope(shield=True):
-                    await self._redis.expire(session_key, self._session_ttl)  # type: ignore
+                    # Run in thread to avoid blocking
+                    await anyio.to_thread.run_sync(
+                        lambda: self._redis.expire(session_key, self._session_ttl)
+                    )
             except anyio.get_cancelled_exc_class():
                 break
             except Exception as e:
@@ -123,33 +184,39 @@ class RedisMessageDispatch:
         """Background task that listens for messages on subscribed channels."""
         async with self._limiter:
             while True:
+                # Check for cancellation
                 await lowlevel.checkpoint()
+                
+                # Use a shield to prevent cancellation during message processing
                 with CancelScope(shield=True):
-                    message: None | dict[str, Any] = await self._pubsub.get_message(  # type: ignore
-                        ignore_subscribe_messages=True,
-                        timeout=0.1,  # type: ignore
+                    # Get message with non-blocking call using thread
+                    message = await anyio.to_thread.run_sync(
+                        lambda: self._pubsub.get_message(
+                            ignore_subscribe_messages=True,
+                            timeout=0.1,
+                        )
                     )
+                    
                     if message is None:
+                        # No message available, sleep briefly and try again
+                        await anyio.sleep(0.01)
                         continue
 
                     channel: str = cast(str, message["channel"])
                     session_id = self._extract_session_id(channel)
                     if session_id is None:
-                        logger.debug(
-                            f"Ignoring message from non-MCP channel: {channel}"
-                        )
+                        logger.debug(f"Ignoring message from non-MCP channel: {channel}")
                         continue
 
                     data: str = cast(str, message["data"])
                     try:
                         if session_state := self._session_state.get(session_id):
+                            # Process message in task group
                             session_state[1].start_soon(
                                 self._handle_message, session_id, data
                             )
                         else:
-                            logger.warning(
-                                f"Message dropped: unknown session {session_id}"
-                            )
+                            logger.warning(f"Message dropped: unknown session {session_id}")
                     except Exception as e:
                         logger.error(f"Error processing message for {session_id}: {e}")
 
@@ -186,11 +253,15 @@ class RedisMessageDispatch:
             data = message.model_dump_json()
 
         channel = self._session_channel(session_id)
-        await self._redis.publish(channel, data)  # type: ignore[attr-defined]
+        
+        # Run publish in thread to avoid blocking
+        await anyio.to_thread.run_sync(lambda: self._redis.publish(channel, data))
         logger.debug(f"Message published to Redis channel for session {session_id}")
         return True
 
     async def session_exists(self, session_id: UUID) -> bool:
         """Check if a session exists."""
         session_key = self._session_key(session_id)
-        return bool(await self._redis.exists(session_key))  # type: ignore
+        # Run exists command in thread to avoid blocking
+        exists = await anyio.to_thread.run_sync(lambda: self._redis.exists(session_key))
+        return bool(exists)

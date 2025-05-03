@@ -9,7 +9,9 @@ import mcp.types as types
 
 # Set up fakeredis for testing
 try:
-    from fakeredis import aioredis as fake_redis
+    import fakeredis
+    # Older fakeredis (v1.9.0) doesn't have aioredis module
+    fake_redis = fakeredis
 except ImportError:
     pytest.skip(
         "fakeredis is required for testing Redis functionality", allow_module_level=True
@@ -20,7 +22,7 @@ except ImportError:
 async def redis_dispatch():
     """Create a Redis message dispatch with a fake Redis client."""
     # Mock the redis module entirely within RedisMessageDispatch
-    with patch("mcp.server.message_queue.redis.redis", fake_redis.FakeRedis):
+    with patch("mcp.server.message_queue.redis.redis.StrictRedis", fake_redis.FakeStrictRedis):
         from mcp.server.message_queue.redis import RedisMessageDispatch
         
         dispatch = RedisMessageDispatch(session_ttl=5)  # Shorter TTL for testing
@@ -53,7 +55,8 @@ async def test_session_ttl(redis_dispatch):
     
     async with redis_dispatch.subscribe(session_id, AsyncMock()):
         session_key = redis_dispatch._session_key(session_id)
-        ttl = await redis_dispatch._redis.ttl(session_key)  # type: ignore
+        # Updated for synchronous Redis client
+        ttl = await anyio.to_thread.run_sync(lambda: redis_dispatch._redis.ttl(session_key))
         assert ttl > 0
         assert ttl <= redis_dispatch._session_ttl
 
@@ -67,14 +70,14 @@ async def test_session_heartbeat(redis_dispatch):
         session_key = redis_dispatch._session_key(session_id)
         
         # Initial TTL
-        initial_ttl = await redis_dispatch._redis.ttl(session_key)  # type: ignore
+        initial_ttl = await anyio.to_thread.run_sync(lambda: redis_dispatch._redis.ttl(session_key))
         assert initial_ttl > 0
         
         # Wait for heartbeat to run
         await anyio.sleep(redis_dispatch._session_ttl / 2 + 0.5)
         
         # TTL should be refreshed
-        refreshed_ttl = await redis_dispatch._redis.ttl(session_key)  # type: ignore
+        refreshed_ttl = await anyio.to_thread.run_sync(lambda: redis_dispatch._redis.ttl(session_key))
         assert refreshed_ttl > 0
         assert refreshed_ttl <= redis_dispatch._session_ttl
 

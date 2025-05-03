@@ -22,7 +22,9 @@ SERVER_NAME = "test_server_for_redis_integration"
 
 # Set up fakeredis for testing
 try:
-    from fakeredis import aioredis as fake_redis
+    import fakeredis
+    # Older fakeredis (v1.9.0) doesn't have aioredis module
+    fake_redis = fakeredis
 except ImportError:
     pytest.skip(
         "fakeredis is required for testing Redis functionality", allow_module_level=True
@@ -64,10 +66,10 @@ class RedisTestServer(Server):
 def make_redis_server_app() -> Starlette:
     """Create test Starlette app with SSE transport and Redis message dispatch"""
     # Create a mock Redis instance
-    mock_redis = fake_redis.FakeRedis()
+    mock_redis = fake_redis.FakeStrictRedis(decode_responses=True)
     
     # Patch the redis module within RedisMessageDispatch
-    with patch("mcp.server.message_queue.redis.redis", mock_redis):
+    with patch("mcp.server.message_queue.redis.redis.StrictRedis", lambda *args, **kwargs: mock_redis):
         from mcp.server.message_queue.redis import RedisMessageDispatch
         
         # Create Redis message dispatch with mock redis
@@ -173,11 +175,11 @@ async def test_redis_integration_tool_call(server: None, server_url: str) -> Non
 async def test_redis_integration_session_lifecycle() -> None:
     """Test that sessions are properly added to and removed from Redis using direct Redis access"""
     # Create a fresh Redis instance with decode_responses=True to get str instead of bytes
-    mock_redis = fake_redis.FakeRedis(decode_responses=True)
+    mock_redis = fake_redis.FakeStrictRedis(decode_responses=True)
     active_sessions_key = "mcp:pubsub:active_sessions"
     
     # Mock Redis in RedisMessageDispatch
-    with patch("mcp.server.message_queue.redis.redis.from_url", return_value=mock_redis):
+    with patch("mcp.server.message_queue.redis.redis.StrictRedis", lambda *args, **kwargs: mock_redis):
         from mcp.server.message_queue.redis import RedisMessageDispatch
         
         # Create Redis message dispatch with our specific mock redis instance
@@ -197,7 +199,7 @@ async def test_redis_integration_session_lifecycle() -> None:
             await anyio.sleep(0.05)
             
             # Check that session was added to Redis
-            active_sessions = await mock_redis.smembers(active_sessions_key)
+            active_sessions = mock_redis.smembers(active_sessions_key)
             assert len(active_sessions) == 1
             assert list(active_sessions)[0] == session_id.hex
             
@@ -208,7 +210,7 @@ async def test_redis_integration_session_lifecycle() -> None:
         await anyio.sleep(0.05)
         
         # After context exit, verify the session was removed
-        final_sessions = await mock_redis.smembers(active_sessions_key)
+        final_sessions = mock_redis.smembers(active_sessions_key)
         assert len(final_sessions) == 0
         assert not await message_dispatch.session_exists(session_id)
 
@@ -217,10 +219,10 @@ async def test_redis_integration_session_lifecycle() -> None:
 async def test_redis_integration_message_publishing_direct() -> None:
     """Test message publishing through Redis channels using direct Redis access"""
     # Create a fresh Redis instance with decode_responses=True to get str instead of bytes
-    mock_redis = fake_redis.FakeRedis(decode_responses=True)
+    mock_redis = fake_redis.FakeStrictRedis(decode_responses=True)
     
     # Mock Redis in RedisMessageDispatch
-    with patch("mcp.server.message_queue.redis.redis.from_url", return_value=mock_redis):
+    with patch("mcp.server.message_queue.redis.redis.StrictRedis", lambda *args, **kwargs: mock_redis):
         from mcp.server.message_queue.redis import RedisMessageDispatch
         from mcp.types import JSONRPCMessage, JSONRPCRequest
         
@@ -252,8 +254,8 @@ async def test_redis_integration_message_publishing_direct() -> None:
             assert success
             
             # Give some time for the message to be processed
-            # Use a shorter sleep since we're in controlled test environment
-            await anyio.sleep(0.1)
+            # Use a longer sleep since we're with older Redis version
+            await anyio.sleep(0.5)
             
             # Verify that the message was received
             assert len(messages_received) > 0, "No messages were received through the callback"

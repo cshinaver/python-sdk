@@ -30,14 +30,15 @@ dependencies = [
     "sse-starlette>=1.6.1",
     "pydantic-settings>=2.5.2",
     "uvicorn>=0.23.1; sys_platform != 'emscripten'",
-    "fakeredis==2.28.1",
+    "fakeredis==1.9.0",
+    "redis==3.2.1",
 ]
 
 [project.optional-dependencies]
 rich = ["rich>=13.9.4"]
 cli = ["typer>=0.12.4", "python-dotenv>=1.0.0"]
 ws = ["websockets>=15.0.1"]
-redis = ["redis>=5.2.1", "types-redis>=4.6.0.20241004"]
+redis = ["redis==3.2.1"]
 
 [project.scripts]
 mcp = "mcp.cli:app [cli]"
@@ -115,5 +116,7 @@ filterwarnings = [
     # This should be fixed on Uvicorn's side.
     "ignore::DeprecationWarning:websockets",
     "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
-    "ignore:Returning str or bytes.*:DeprecationWarning:mcp.server.lowlevel"
+    "ignore:Returning str or bytes.*:DeprecationWarning:mcp.server.lowlevel",
+    # Ignore distutils deprecation from Redis 3.2.1
+    "ignore:The distutils package is deprecated.*:DeprecationWarning"
 ]
