@@ -63,8 +63,6 @@ class RedisMessageDispatch:
         self._pubsub_thread = None
         # Lock for thread safety
         self._lock = threading.RLock()
-        # Tracks current subscriptions
-        self._subscriptions: set[str] = set()
         # Ensures only one polling task runs at a time for message handling
         self._limiter = CapacityLimiter(1)
         # Active sessions set key
@@ -110,7 +108,6 @@ class RedisMessageDispatch:
         with self._lock:
             # Subscribe to channel
             await anyio.to_thread.run_sync(lambda: self._pubsub.subscribe(channel))
-            self._subscriptions.add(channel)
         
         logger.debug(f"Subscribing to Redis channel for session {session_id}")
         
@@ -133,7 +130,6 @@ class RedisMessageDispatch:
                         await anyio.to_thread.run_sync(
                             lambda: self._pubsub.unsubscribe(channel)
                         )
-                        self._subscriptions.discard(channel)
                     
                     # Delete session key and remove from active sessions
                     await anyio.to_thread.run_sync(lambda: self._redis.delete(session_key))
