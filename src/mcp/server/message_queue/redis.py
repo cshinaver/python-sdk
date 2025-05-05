@@ -51,8 +51,6 @@ class RedisMessageDispatch:
         self._session_state: dict[UUID, tuple[MessageCallback, TaskGroup]] = {}
         # Ensures only one polling task runs at a time for message handling
         self._limiter = CapacityLimiter(1)
-        # Active sessions set key
-        self._active_sessions_key = f"{self._prefix}active_sessions"
         logger.debug(f"Redis message dispatch initialized: {redis_url}")
 
     async def close(self):
@@ -77,11 +75,6 @@ class RedisMessageDispatch:
         # Run Redis operations in anyio's run_sync to make blocking calls non-blocking
         await anyio.to_thread.run_sync(
             lambda: self._redis.setex(session_key, self._session_ttl, "1")
-        )
-        
-        # Add to active sessions set
-        await anyio.to_thread.run_sync(
-            lambda: self._redis.sadd(self._active_sessions_key, session_id.hex)
         )
         
         channel = self._session_channel(session_id)
@@ -109,11 +102,8 @@ class RedisMessageDispatch:
                         lambda: self._pubsub.unsubscribe(channel)
                     )
                     
-                    # Delete session key and remove from active sessions
+                    # Delete session key
                     await anyio.to_thread.run_sync(lambda: self._redis.delete(session_key))
-                    await anyio.to_thread.run_sync(
-                        lambda: self._redis.srem(self._active_sessions_key, session_id.hex)
-                    )
                     
                     # Clean up session state
                     del self._session_state[session_id]

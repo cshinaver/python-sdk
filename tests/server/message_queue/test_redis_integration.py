@@ -178,7 +178,6 @@ async def test_redis_integration_session_lifecycle() -> None:
     """Test that sessions are properly added to and removed from Redis using direct Redis access"""
     # Create a fresh Redis instance with decode_responses=True to get str instead of bytes
     mock_redis = fake_redis.FakeStrictRedis(decode_responses=True)
-    active_sessions_key = "mcp:pubsub:active_sessions"
     
     # Mock Redis in RedisMessageDispatch
     with patch("mcp.server.message_queue.redis.redis.StrictRedis") as mock_strict_redis:
@@ -202,11 +201,6 @@ async def test_redis_integration_session_lifecycle() -> None:
             # Give a moment for the session to be added
             await anyio.sleep(0.05)
             
-            # Check that session was added to Redis
-            active_sessions = mock_redis.smembers(active_sessions_key)
-            assert len(active_sessions) == 1
-            assert list(active_sessions)[0] == session_id.hex
-            
             # Verify session exists
             assert await message_dispatch.session_exists(session_id)
         
@@ -214,8 +208,6 @@ async def test_redis_integration_session_lifecycle() -> None:
         await anyio.sleep(0.05)
         
         # After context exit, verify the session was removed
-        final_sessions = mock_redis.smembers(active_sessions_key)
-        assert len(final_sessions) == 0
         assert not await message_dispatch.session_exists(session_id)
 
 
