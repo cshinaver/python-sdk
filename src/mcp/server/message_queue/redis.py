@@ -49,8 +49,6 @@ class RedisMessageDispatch:
         self._session_ttl = session_ttl
         # Maps session IDs to the callback and task group for that SSE session.
         self._session_state: dict[UUID, tuple[MessageCallback, TaskGroup]] = {}
-        # Thread for pubsub listening
-        self._pubsub_thread = None
         # Ensures only one polling task runs at a time for message handling
         self._limiter = CapacityLimiter(1)
         # Active sessions set key
@@ -59,10 +57,6 @@ class RedisMessageDispatch:
 
     async def close(self):
         """Close Redis connections."""
-        # Stop pubsub thread if running
-        if self._pubsub_thread:
-            self._pubsub_thread.stop()
-        
         # Clean up pubsub and connection
         self._pubsub.close()
         # Redis connection in 3.2.1 doesn't need explicit closing
@@ -99,9 +93,8 @@ class RedisMessageDispatch:
         
         async with anyio.create_task_group() as tg:
             self._session_state[session_id] = (callback, tg)
-            # Start message listener if not running
-            if not self._pubsub_thread:
-                tg.start_soon(self._listen_for_messages)
+            # Start message listener
+            tg.start_soon(self._listen_for_messages)
             
             # Start heartbeat for this session
             tg.start_soon(self._session_heartbeat, session_id)
