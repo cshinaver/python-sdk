@@ -41,18 +41,8 @@ class RedisMessageDispatch:
             prefix: Key prefix for Redis channels to avoid collisions
             session_ttl: TTL in seconds for session keys (default: 1 hour)
         """
-        # Parse Redis URL and create connection
-        if redis_url.startswith("redis://"):
-            host_port = redis_url.replace("redis://", "").split("/")[0]
-            if ":" in host_port:
-                host, port = host_port.split(":")
-                port = int(port)
-            else:
-                host, port = host_port, 6379
-            db = int(redis_url.split("/")[-1]) if "/" in redis_url else 0
-            self._redis = redis.StrictRedis(host=host, port=port, db=db, decode_responses=True)
-        else:
-            self._redis = redis.StrictRedis.from_url(redis_url, decode_responses=True)
+        # Create Redis connection
+        self._redis = redis.StrictRedis.from_url(redis_url, decode_responses=True)
         
         self._pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
         self._prefix = prefix

@@ -69,7 +69,9 @@ def make_redis_server_app() -> Starlette:
     mock_redis = fake_redis.FakeStrictRedis(decode_responses=True)
     
     # Patch the redis module within RedisMessageDispatch
-    with patch("mcp.server.message_queue.redis.redis.StrictRedis", lambda *args, **kwargs: mock_redis):
+    with patch("mcp.server.message_queue.redis.redis.StrictRedis") as mock_strict_redis:
+        # Configure mock to handle from_url properly
+        mock_strict_redis.from_url = lambda *args, **kwargs: mock_redis
         from mcp.server.message_queue.redis import RedisMessageDispatch
         
         # Create Redis message dispatch with mock redis
@@ -179,7 +181,9 @@ async def test_redis_integration_session_lifecycle() -> None:
     active_sessions_key = "mcp:pubsub:active_sessions"
     
     # Mock Redis in RedisMessageDispatch
-    with patch("mcp.server.message_queue.redis.redis.StrictRedis", lambda *args, **kwargs: mock_redis):
+    with patch("mcp.server.message_queue.redis.redis.StrictRedis") as mock_strict_redis:
+        # Configure mock to handle from_url properly
+        mock_strict_redis.from_url = lambda *args, **kwargs: mock_redis
         from mcp.server.message_queue.redis import RedisMessageDispatch
         
         # Create Redis message dispatch with our specific mock redis instance
@@ -222,7 +226,9 @@ async def test_redis_integration_message_publishing_direct() -> None:
     mock_redis = fake_redis.FakeStrictRedis(decode_responses=True)
     
     # Mock Redis in RedisMessageDispatch
-    with patch("mcp.server.message_queue.redis.redis.StrictRedis", lambda *args, **kwargs: mock_redis):
+    with patch("mcp.server.message_queue.redis.redis.StrictRedis") as mock_strict_redis:
+        # Configure mock to handle from_url properly
+        mock_strict_redis.from_url = lambda *args, **kwargs: mock_redis
         from mcp.server.message_queue.redis import RedisMessageDispatch
         from mcp.types import JSONRPCMessage, JSONRPCRequest
         
